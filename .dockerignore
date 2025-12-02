@@ -1,0 +1,68 @@
+# Git
+.git
+.gitignore
+.gitattributes
+
+# Documentation
+*.md
+docs/
+LICENSE
+
+# Build artifacts
+bin/
+dist/
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Test files
+*_test.go
+**/*_test.go
+coverage.*
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+
+# Certificates (will be generated in container)
+*.pem
+*.key
+*.crt
+*.csr
+certs/
+
+# Logs
+*.log
+logs/
+
+# Environment
+.env
+.env.local
+
+# Dependencies (will be downloaded in container)
+vendor/
+
+# CI/CD
+.github/
+.gitlab-ci.yml
+.travis.yml
+
+# Development tools
+Makefile
+scripts/
+
+# Examples
+examples/
