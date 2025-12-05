@@ -1,0 +1,43 @@
+# Dockerfile for deploying drip-server from GitHub Release
+# Usage:
+#   docker build -f deployments/Dockerfile.release -t drip-server .
+#   docker build -f deployments/Dockerfile.release --build-arg VERSION=v1.0.0 -t drip-server:v1.0.0 .
+
+FROM alpine:latest
+
+# VERSION is passed from GitHub Actions (release tag or "latest")
+ARG VERSION=latest
+# TARGETARCH is automatically set by Docker Buildx (amd64, arm64, etc.)
+ARG TARGETARCH=amd64
+
+RUN apk add --no-cache ca-certificates tzdata curl && update-ca-certificates
+
+RUN addgroup -S drip && adduser -S -G drip drip
+
+WORKDIR /app
+
+# Download binary from GitHub Releases
+RUN set -ex; \
+    # Resolve "latest" to an actual tag
+    if [ "$VERSION" = "latest" ]; then \
+        VERSION=$(curl -sL https://api.github.com/repos/Gouryella/drip/releases/latest \
+          | grep '"tag_name"' | cut -d'"' -f4); \
+    fi; \
+    echo "Resolved VERSION=${VERSION}"; \
+    echo "Downloading drip ${VERSION} for linux-${TARGETARCH}"; \
+    curl -fsSL "https://github.com/Gouryella/drip/releases/download/${VERSION}/drip-${VERSION}-linux-${TARGETARCH}" -o /app/drip; \
+    chmod +x /app/drip; \
+    /app/drip version --short
+
+RUN mkdir -p /app/data/certs && \
+    chown -R drip:drip /app
+
+USER drip
+
+EXPOSE 80 443 8080 20000-20100
+
+HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
+    CMD curl -fsS "http://localhost:${PORT:-8080}/health" >/dev/null || exit 1
+
+ENTRYPOINT ["/app/drip"]
+CMD ["server", "--port", "8080"]

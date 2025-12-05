@@ -18,9 +18,6 @@ const (
 	// RequestTimeout is the maximum time to wait for a response from the client
 	RequestTimeout = 30 * time.Second
 
-	// MaxRequestBodySize is the maximum size of an HTTP request body (10MB)
-	MaxRequestBodySize = 10 * 1024 * 1024
-
 	// ReconnectBaseDelay is the initial delay for reconnection attempts
 	ReconnectBaseDelay = 1 * time.Second
 

@@ -1,7 +1,6 @@
 package proxy
 
 import (
-	"context"
 	"fmt"
 	"io"
 	"net/http"
@@ -12,7 +11,6 @@ import (
 	json "github.com/goccy/go-json"
 
 	"drip/internal/server/tunnel"
-	"drip/internal/shared/constants"
 	"drip/internal/shared/pool"
 	"drip/internal/shared/protocol"
 	"drip/internal/shared/utils"
@@ -71,17 +69,53 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	limitedReader := io.LimitReader(r.Body, constants.MaxRequestBodySize)
-	body, err := io.ReadAll(limitedReader)
-	if err != nil {
-		h.logger.Error("Read request body failed", zap.Error(err))
-		http.Error(w, "Failed to read request body", http.StatusInternalServerError)
-		return
-	}
-	defer r.Body.Close()
-
 	requestID := utils.GenerateID()
 
+	h.handleAdaptiveRequest(w, r, transport, requestID, subdomain)
+}
+
+func (h *Handler) handleAdaptiveRequest(w http.ResponseWriter, r *http.Request, transport tunnel.Transport, requestID string, subdomain string) {
+	const streamingThreshold int64 = 1 * 1024 * 1024
+
+	buffer := make([]byte, 0, streamingThreshold)
+	tempBuf := make([]byte, 32*1024)
+
+	var totalRead int64
+	var hitThreshold bool
+
+	for totalRead < streamingThreshold {
+		n, err := r.Body.Read(tempBuf)
+		if n > 0 {
+			buffer = append(buffer, tempBuf[:n]...)
+			totalRead += int64(n)
+		}
+		if err == io.EOF {
+			r.Body.Close()
+			h.sendBufferedRequest(w, r, transport, requestID, subdomain, buffer)
+			return
+		}
+		if err != nil {
+			r.Body.Close()
+			h.logger.Error("Read request body failed", zap.Error(err))
+			http.Error(w, "Failed to read request body", http.StatusInternalServerError)
+			return
+		}
+		if totalRead >= streamingThreshold {
+			hitThreshold = true
+			break
+		}
+	}
+
+	if !hitThreshold {
+		r.Body.Close()
+		h.sendBufferedRequest(w, r, transport, requestID, subdomain, buffer)
+		return
+	}
+
+	h.streamLargeRequest(w, r, transport, requestID, subdomain, buffer)
+}
+
+func (h *Handler) sendBufferedRequest(w http.ResponseWriter, r *http.Request, transport tunnel.Transport, requestID string, subdomain string, body []byte) {
 	headers := h.headerPool.Get()
 	h.headerPool.CloneWithExtra(headers, r.Header, "Host", r.Host)
 
@@ -93,7 +127,6 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	reqBytes, err := protocol.EncodeHTTPRequest(&httpReq)
-
 	h.headerPool.Put(headers)
 
 	if err != nil {
@@ -119,7 +152,11 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	frame := protocol.NewFramePooled(protocol.FrameTypeData, payload, poolBuffer)
 
 	respChan := h.responses.CreateResponseChan(requestID)
-	defer h.responses.CleanupResponseChan(requestID)
+	streamingDone := h.responses.CreateStreamingResponse(requestID, w)
+	defer func() {
+		h.responses.CleanupResponseChan(requestID)
+		h.responses.CleanupStreamingResponse(requestID)
+	}()
 
 	if err := transport.SendFrame(frame); err != nil {
 		h.logger.Error("Send frame to tunnel failed", zap.Error(err))
@@ -127,14 +164,220 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), constants.RequestTimeout)
-	defer cancel()
+	select {
+	case respMsg := <-respChan:
+		if respMsg == nil {
+			http.Error(w, "Internal server error: nil response", http.StatusInternalServerError)
+			return
+		}
+		h.writeHTTPResponse(w, respMsg, subdomain, r)
+	case <-streamingDone:
+		// Streaming response has been fully written by SendStreamingChunk
+	case <-time.After(5 * time.Minute):
+		h.logger.Error("Request timeout",
+			zap.String("request_id", requestID),
+			zap.String("url", r.URL.String()),
+		)
+		http.Error(w, "Request timeout - the tunnel client did not respond in time", http.StatusGatewayTimeout)
+	}
+}
+
+func (h *Handler) streamLargeRequest(w http.ResponseWriter, r *http.Request, transport tunnel.Transport, requestID string, subdomain string, bufferedData []byte) {
+	headers := h.headerPool.Get()
+	h.headerPool.CloneWithExtra(headers, r.Header, "Host", r.Host)
+
+	httpReqHead := protocol.HTTPRequestHead{
+		Method:        r.Method,
+		URL:           r.URL.String(),
+		Headers:       headers,
+		ContentLength: r.ContentLength,
+	}
+
+	headBytes, err := protocol.EncodeHTTPRequestHead(&httpReqHead)
+	h.headerPool.Put(headers)
+
+	if err != nil {
+		h.logger.Error("Encode HTTP request head failed", zap.Error(err))
+		http.Error(w, "Internal server error", http.StatusInternalServerError)
+		return
+	}
+
+	headHeader := protocol.DataHeader{
+		StreamID:  requestID,
+		RequestID: requestID,
+		Type:      protocol.DataTypeHTTPHead, // shared streaming head type
+		IsLast:    false,
+	}
+
+	headPayload, headPoolBuffer, err := protocol.EncodeDataPayloadPooled(headHeader, headBytes)
+	if err != nil {
+		h.logger.Error("Encode head payload failed", zap.Error(err))
+		http.Error(w, "Internal server error", http.StatusInternalServerError)
+		return
+	}
+
+	headFrame := protocol.NewFramePooled(protocol.FrameTypeData, headPayload, headPoolBuffer)
+
+	respChan := h.responses.CreateResponseChan(requestID)
+	streamingDone := h.responses.CreateStreamingResponse(requestID, w)
+	defer func() {
+		h.responses.CleanupResponseChan(requestID)
+		h.responses.CleanupStreamingResponse(requestID)
+	}()
+
+	if err := transport.SendFrame(headFrame); err != nil {
+		h.logger.Error("Send head frame failed", zap.Error(err))
+		http.Error(w, "Failed to forward request to tunnel", http.StatusBadGateway)
+		return
+	}
+
+	if len(bufferedData) > 0 {
+		chunkHeader := protocol.DataHeader{
+			StreamID:  requestID,
+			RequestID: requestID,
+			Type:      protocol.DataTypeHTTPBodyChunk, // shared streaming body type
+			IsLast:    false,
+		}
+
+		chunkPayload, chunkPoolBuffer, err := protocol.EncodeDataPayloadPooled(chunkHeader, bufferedData)
+		if err != nil {
+			h.logger.Error("Encode buffered chunk failed", zap.Error(err))
+
+			finalHeader := protocol.DataHeader{
+				StreamID:  requestID,
+				RequestID: requestID,
+				Type:      protocol.DataTypeHTTPRequestBodyChunk,
+				IsLast:    true,
+			}
+			finalPayload, finalPoolBuffer, ferr := protocol.EncodeDataPayloadPooled(finalHeader, nil)
+			if ferr == nil {
+				finalFrame := protocol.NewFramePooled(protocol.FrameTypeData, finalPayload, finalPoolBuffer)
+				transport.SendFrame(finalFrame)
+			}
+			return
+		}
+
+		chunkFrame := protocol.NewFramePooled(protocol.FrameTypeData, chunkPayload, chunkPoolBuffer)
+		if err := transport.SendFrame(chunkFrame); err != nil {
+			h.logger.Error("Send buffered chunk failed", zap.Error(err))
+
+			finalHeader := protocol.DataHeader{
+				StreamID:  requestID,
+				RequestID: requestID,
+				Type:      protocol.DataTypeHTTPRequestBodyChunk,
+				IsLast:    true,
+			}
+			finalPayload, finalPoolBuffer, ferr := protocol.EncodeDataPayloadPooled(finalHeader, nil)
+			if ferr == nil {
+				finalFrame := protocol.NewFramePooled(protocol.FrameTypeData, finalPayload, finalPoolBuffer)
+				transport.SendFrame(finalFrame)
+			}
+			return
+		}
+	}
+
+	buffer := make([]byte, 32*1024)
+	for {
+		n, readErr := r.Body.Read(buffer)
+		if n > 0 {
+			isLast := readErr == io.EOF
+
+			chunkHeader := protocol.DataHeader{
+				StreamID:  requestID,
+				RequestID: requestID,
+				Type:      protocol.DataTypeHTTPBodyChunk, // shared streaming body type
+				IsLast:    isLast,
+			}
+
+			chunkPayload, chunkPoolBuffer, err := protocol.EncodeDataPayloadPooled(chunkHeader, buffer[:n])
+			if err != nil {
+				h.logger.Error("Encode chunk payload failed", zap.Error(err))
+
+				finalHeader := protocol.DataHeader{
+					StreamID:  requestID,
+					RequestID: requestID,
+					Type:      protocol.DataTypeHTTPRequestBodyChunk,
+					IsLast:    true,
+				}
+				finalPayload, finalPoolBuffer, ferr := protocol.EncodeDataPayloadPooled(finalHeader, nil)
+				if ferr == nil {
+					finalFrame := protocol.NewFramePooled(protocol.FrameTypeData, finalPayload, finalPoolBuffer)
+					transport.SendFrame(finalFrame)
+				}
+				return
+			}
+
+			chunkFrame := protocol.NewFramePooled(protocol.FrameTypeData, chunkPayload, chunkPoolBuffer)
+			if err := transport.SendFrame(chunkFrame); err != nil {
+				h.logger.Error("Send chunk frame failed", zap.Error(err))
+
+				finalHeader := protocol.DataHeader{
+					StreamID:  requestID,
+					RequestID: requestID,
+					Type:      protocol.DataTypeHTTPRequestBodyChunk,
+					IsLast:    true,
+				}
+				finalPayload, finalPoolBuffer, ferr := protocol.EncodeDataPayloadPooled(finalHeader, nil)
+				if ferr == nil {
+					finalFrame := protocol.NewFramePooled(protocol.FrameTypeData, finalPayload, finalPoolBuffer)
+					transport.SendFrame(finalFrame)
+				}
+				return
+			}
+		}
+
+		if readErr == io.EOF {
+			if n == 0 {
+				finalHeader := protocol.DataHeader{
+					StreamID:  requestID,
+					RequestID: requestID,
+					Type:      protocol.DataTypeHTTPRequestBodyChunk,
+					IsLast:    true,
+				}
+				finalPayload, finalPoolBuffer, err := protocol.EncodeDataPayloadPooled(finalHeader, nil)
+				if err == nil {
+					finalFrame := protocol.NewFramePooled(protocol.FrameTypeData, finalPayload, finalPoolBuffer)
+					transport.SendFrame(finalFrame)
+				}
+			}
+			break
+		}
+		if readErr != nil {
+			h.logger.Error("Read request body failed", zap.Error(readErr))
+
+			finalHeader := protocol.DataHeader{
+				StreamID:  requestID,
+				RequestID: requestID,
+				Type:      protocol.DataTypeHTTPRequestBodyChunk,
+				IsLast:    true,
+			}
+			finalPayload, finalPoolBuffer, err := protocol.EncodeDataPayloadPooled(finalHeader, nil)
+			if err == nil {
+				finalFrame := protocol.NewFramePooled(protocol.FrameTypeData, finalPayload, finalPoolBuffer)
+				transport.SendFrame(finalFrame)
+			}
+
+			http.Error(w, "Failed to read request body", http.StatusInternalServerError)
+			return
+		}
+	}
+
+	r.Body.Close()
 
 	select {
 	case respMsg := <-respChan:
+		if respMsg == nil {
+			http.Error(w, "Internal server error: nil response", http.StatusInternalServerError)
+			return
+		}
 		h.writeHTTPResponse(w, respMsg, subdomain, r)
-
-	case <-ctx.Done():
+	case <-streamingDone:
+		// Streaming response has been fully written by SendStreamingChunk
+	case <-time.After(5 * time.Minute):
+		h.logger.Error("Streaming request timeout",
+			zap.String("request_id", requestID),
+			zap.String("url", r.URL.String()),
+		)
 		http.Error(w, "Request timeout - the tunnel client did not respond in time", http.StatusGatewayTimeout)
 	}
 }
@@ -145,12 +388,23 @@ func (h *Handler) writeHTTPResponse(w http.ResponseWriter, resp *protocol.HTTPRe
 		return
 	}
 
+	// For buffered responses, we have the complete body, so we can set Content-Length
+	// Skip ALL hop-by-hop headers - client should have already cleaned them
 	for key, values := range resp.Headers {
-		if key == "Connection" || key == "Keep-Alive" || key == "Transfer-Encoding" || key == "Upgrade" {
+		canonicalKey := http.CanonicalHeaderKey(key)
+
+		// Skip hop-by-hop headers completely using canonical key comparison
+		if canonicalKey == "Connection" ||
+		   canonicalKey == "Keep-Alive" ||
+		   canonicalKey == "Transfer-Encoding" ||
+		   canonicalKey == "Upgrade" ||
+		   canonicalKey == "Proxy-Connection" ||
+		   canonicalKey == "Te" ||
+		   canonicalKey == "Trailer" {
 			continue
 		}
 
-		if key == "Location" && len(values) > 0 {
+		if canonicalKey == "Location" && len(values) > 0 {
 			rewrittenLocation := h.rewriteLocationHeader(values[0], r.Host)
 			w.Header().Set("Location", rewrittenLocation)
 			continue
@@ -161,9 +415,8 @@ func (h *Handler) writeHTTPResponse(w http.ResponseWriter, resp *protocol.HTTPRe
 		}
 	}
 
-	if w.Header().Get("Content-Length") == "" && len(resp.Body) > 0 {
-		w.Header().Set("Content-Length", fmt.Sprintf("%d", len(resp.Body)))
-	}
+	// For buffered mode, always set Content-Length with the actual body size
+	w.Header().Set("Content-Length", fmt.Sprintf("%d", len(resp.Body)))
 
 	statusCode := resp.StatusCode
 	if statusCode == 0 {
@@ -171,6 +424,7 @@ func (h *Handler) writeHTTPResponse(w http.ResponseWriter, resp *protocol.HTTPRe
 	}
 
 	w.WriteHeader(statusCode)
+
 	if len(resp.Body) > 0 {
 		w.Write(resp.Body)
 	}
@@ -282,19 +536,6 @@ func (h *Handler) serveHealth(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(health)
-}
-
-func cloneHeadersWithHost(src http.Header, host string) http.Header {
-	dst := make(http.Header, len(src)+1)
-	for k, v := range src {
-		copied := make([]string, len(v))
-		copy(copied, v)
-		dst[k] = copied
-	}
-	if host != "" {
-		dst.Set("Host", host)
-	}
-	return dst
 }
 
 func (h *Handler) serveStats(w http.ResponseWriter, r *http.Request) {

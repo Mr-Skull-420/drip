@@ -1,8 +1,9 @@
 package protocol
 
 import (
-	json "github.com/goccy/go-json"
 	"errors"
+
+	json "github.com/goccy/go-json"
 
 	"github.com/vmihailenco/msgpack/v5"
 )
@@ -37,6 +38,31 @@ func DecodeHTTPRequest(data []byte) (*HTTPRequest, error) {
 	return &req, nil
 }
 
+// EncodeHTTPRequestHead encodes HTTP request headers for streaming
+func EncodeHTTPRequestHead(head *HTTPRequestHead) ([]byte, error) {
+	return msgpack.Marshal(head)
+}
+
+// DecodeHTTPRequestHead decodes HTTP request headers for streaming
+func DecodeHTTPRequestHead(data []byte) (*HTTPRequestHead, error) {
+	if len(data) == 0 {
+		return nil, errors.New("empty data")
+	}
+
+	var head HTTPRequestHead
+	if data[0] == '{' {
+		if err := json.Unmarshal(data, &head); err != nil {
+			return nil, err
+		}
+	} else {
+		if err := msgpack.Unmarshal(data, &head); err != nil {
+			return nil, err
+		}
+	}
+
+	return &head, nil
+}
+
 // EncodeHTTPResponse encodes HTTPResponse using msgpack encoding (optimized)
 func EncodeHTTPResponse(resp *HTTPResponse) ([]byte, error) {
 	return msgpack.Marshal(resp)
@@ -65,4 +91,29 @@ func DecodeHTTPResponse(data []byte) (*HTTPResponse, error) {
 	}
 
 	return &resp, nil
+}
+
+// EncodeHTTPResponseHead encodes HTTP response headers for streaming
+func EncodeHTTPResponseHead(head *HTTPResponseHead) ([]byte, error) {
+	return msgpack.Marshal(head)
+}
+
+// DecodeHTTPResponseHead decodes HTTP response headers for streaming
+func DecodeHTTPResponseHead(data []byte) (*HTTPResponseHead, error) {
+	if len(data) == 0 {
+		return nil, errors.New("empty data")
+	}
+
+	var head HTTPResponseHead
+	if data[0] == '{' {
+		if err := json.Unmarshal(data, &head); err != nil {
+			return nil, err
+		}
+	} else {
+		if err := msgpack.Unmarshal(data, &head); err != nil {
+			return nil, err
+		}
+	}
+
+	return &head, nil
 }

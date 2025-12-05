@@ -18,11 +18,17 @@ type DataHeader struct {
 type DataType uint8
 
 const (
-	DataTypeData         DataType = 0x00 // 000
-	DataTypeResponse     DataType = 0x01 // 001
-	DataTypeClose        DataType = 0x02 // 010
-	DataTypeHTTPRequest  DataType = 0x03 // 011
-	DataTypeHTTPResponse DataType = 0x04 // 100
+	DataTypeData          DataType = 0x00 // 000
+	DataTypeResponse      DataType = 0x01 // 001
+	DataTypeClose         DataType = 0x02 // 010
+	DataTypeHTTPRequest   DataType = 0x03 // 011
+	DataTypeHTTPResponse  DataType = 0x04 // 100
+	DataTypeHTTPHead      DataType = 0x05 // 101 - streaming headers (shared)
+	DataTypeHTTPBodyChunk DataType = 0x06 // 110 - streaming body chunks (shared)
+
+	// Reuse the same type codes for request streaming to stay within 3 bits.
+	DataTypeHTTPRequestHead      DataType = DataTypeHTTPHead
+	DataTypeHTTPRequestBodyChunk DataType = DataTypeHTTPBodyChunk
 )
 
 // String returns the string representation of DataType
@@ -38,6 +44,10 @@ func (t DataType) String() string {
 		return "http_request"
 	case DataTypeHTTPResponse:
 		return "http_response"
+	case DataTypeHTTPHead:
+		return "http_head"
+	case DataTypeHTTPBodyChunk:
+		return "http_body_chunk"
 	default:
 		return "unknown"
 	}
@@ -56,6 +66,10 @@ func DataTypeFromString(s string) DataType {
 		return DataTypeHTTPRequest
 	case "http_response":
 		return DataTypeHTTPResponse
+	case "http_head":
+		return DataTypeHTTPHead
+	case "http_body_chunk":
+		return DataTypeHTTPBodyChunk
 	default:
 		return DataTypeData
 	}
@@ -118,8 +132,8 @@ func (h *DataHeader) UnmarshalBinary(data []byte) error {
 
 	// Decode flags
 	flags := data[0]
-	h.Type = DataType(flags & 0x07)      // Bits 0-2
-	h.IsLast = (flags & 0x08) != 0       // Bit 3
+	h.Type = DataType(flags & 0x07) // Bits 0-2
+	h.IsLast = (flags & 0x08) != 0  // Bit 3
 
 	// Decode lengths
 	streamIDLen := int(binary.BigEndian.Uint16(data[1:3]))

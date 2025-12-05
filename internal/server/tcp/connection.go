@@ -49,6 +49,9 @@ type HTTPResponseHandler interface {
 	GetResponseChan(requestID string) <-chan *protocol.HTTPResponse
 	CleanupResponseChan(requestID string)
 	SendResponse(requestID string, resp *protocol.HTTPResponse)
+	// Streaming response methods
+	SendStreamingHead(requestID string, head *protocol.HTTPResponseHead) error
+	SendStreamingChunk(requestID string, chunk []byte, isLast bool) error
 }
 
 // NewConnection creates a new connection handler
@@ -273,6 +276,15 @@ func (c *Connection) handleHTTPRequest(reader *bufio.Reader) error {
 				c.logger.Debug("Client disconnected abruptly", zap.Error(err))
 				return nil
 			}
+			// Check if it looks like garbage data (not a valid HTTP request)
+			if strings.Contains(errStr, "malformed HTTP") {
+				c.logger.Warn("Received malformed HTTP request, possibly due to pipelined requests or protocol error",
+					zap.Error(err),
+					zap.String("error_snippet", errStr[:min(len(errStr), 100)]),
+				)
+				// Close connection on malformed request to prevent further errors
+				return nil
+			}
 			c.logger.Error("Failed to parse HTTP request", zap.Error(err))
 			return fmt.Errorf("failed to parse HTTP request: %w", err)
 		}
@@ -289,8 +301,20 @@ func (c *Connection) handleHTTPRequest(reader *bufio.Reader) error {
 			header: make(http.Header),
 		}
 
-		// Handle the request
+		// Handle the request - this blocks until response is complete
 		c.httpHandler.ServeHTTP(respWriter, req)
+
+		// Ensure response is flushed to client
+		if tcpConn, ok := c.conn.(*net.TCPConn); ok {
+			// Force flush TCP buffers
+			tcpConn.SetNoDelay(true)
+			tcpConn.SetNoDelay(false)
+		}
+
+		c.logger.Debug("HTTP request processing completed",
+			zap.String("method", req.Method),
+			zap.String("url", req.URL.String()),
+		)
 
 		// Check if we should close the connection
 		// Close if: Connection: close header, or HTTP/1.0 without Connection: keep-alive
@@ -304,13 +328,25 @@ func (c *Connection) handleHTTPRequest(reader *bufio.Reader) error {
 			}
 		}
 
+		// Also check if response indicated connection should close
+		if respWriter.headerWritten && respWriter.header.Get("Connection") == "close" {
+			shouldClose = true
+		}
+
 		if shouldClose {
-			c.logger.Debug("Closing connection as requested by client")
+			c.logger.Debug("Closing connection as requested by client or server")
 			return nil
 		}
 
 		// Continue to next request on the same connection
 	}
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
 
 // handleFrames handles incoming frames
@@ -439,10 +475,55 @@ func (c *Connection) handleDataFrame(frame *protocol.Frame) {
 		}
 
 		c.responseChans.SendResponse(reqID, httpResp)
+	case protocol.DataTypeHTTPHead:
+		// Streaming HTTP response headers
+		if c.responseChans == nil {
+			c.logger.Warn("No response handler for streaming HTTP head",
+				zap.String("stream_id", header.StreamID),
+			)
+			return
+		}
 
-		c.logger.Debug("Routed HTTP response to channel",
-			zap.String("request_id", reqID),
-		)
+		httpHead, err := protocol.DecodeHTTPResponseHead(data)
+		if err != nil {
+			c.logger.Error("Failed to decode HTTP response head",
+				zap.String("stream_id", header.StreamID),
+				zap.Error(err),
+			)
+			return
+		}
+
+		reqID := header.RequestID
+		if reqID == "" {
+			reqID = header.StreamID
+		}
+
+		if err := c.responseChans.SendStreamingHead(reqID, httpHead); err != nil {
+			c.logger.Error("Failed to send streaming head",
+				zap.String("request_id", reqID),
+				zap.Error(err),
+			)
+		}
+	case protocol.DataTypeHTTPBodyChunk:
+		// Streaming HTTP response body chunk
+		if c.responseChans == nil {
+			c.logger.Warn("No response handler for streaming HTTP chunk",
+				zap.String("stream_id", header.StreamID),
+			)
+			return
+		}
+
+		reqID := header.RequestID
+		if reqID == "" {
+			reqID = header.StreamID
+		}
+
+		if err := c.responseChans.SendStreamingChunk(reqID, data, header.IsLast); err != nil {
+			c.logger.Error("Failed to send streaming chunk",
+				zap.String("request_id", reqID),
+				zap.Error(err),
+			)
+		}
 	case protocol.DataTypeClose:
 		// Client is closing the stream
 		if c.proxy != nil {
@@ -487,7 +568,12 @@ func (c *Connection) SendFrame(frame *protocol.Frame) error {
 	if c.frameWriter == nil {
 		return protocol.WriteFrame(c.conn, frame)
 	}
-	return c.frameWriter.WriteFrame(frame)
+	if err := c.frameWriter.WriteFrame(frame); err != nil {
+		return err
+	}
+	// Flush immediately to ensure the frame is sent without batching delay
+	c.frameWriter.Flush()
+	return nil
 }
 
 // sendError sends an error frame to the client

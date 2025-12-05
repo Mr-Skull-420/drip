@@ -7,7 +7,7 @@ import (
 // RenderConfigInit renders config initialization UI
 func RenderConfigInit() string {
 	title := "Drip Configuration Setup"
-	box := boxStyle.Copy().Width(50)
+	box := boxStyle.Width(50)
 	return "\n" + box.Render(titleStyle.Render(title)) + "\n"
 }
 

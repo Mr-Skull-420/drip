@@ -203,7 +203,3 @@ func isNonRetryableError(err error) bool {
 		strings.Contains(errStr, "authentication") ||
 		strings.Contains(errStr, "Invalid authentication token")
 }
-
-func isNonRetryableErrorTCP(err error) bool {
-	return isNonRetryableError(err)
-}

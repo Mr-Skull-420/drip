@@ -33,12 +33,28 @@ type HTTPRequest struct {
 	Body    []byte              `json:"body,omitempty"`
 }
 
+// HTTPRequestHead represents HTTP request headers for streaming (no body)
+type HTTPRequestHead struct {
+	Method        string              `json:"method"`
+	URL           string              `json:"url"`
+	Headers       map[string][]string `json:"headers"`
+	ContentLength int64               `json:"content_length"` // -1 for unknown/chunked
+}
+
 // HTTPResponse represents an HTTP response from the local service
 type HTTPResponse struct {
 	StatusCode int                 `json:"status_code"`
 	Status     string              `json:"status"`
 	Headers    map[string][]string `json:"headers"`
 	Body       []byte              `json:"body,omitempty"`
+}
+
+// HTTPResponseHead represents HTTP response headers for streaming (no body)
+type HTTPResponseHead struct {
+	StatusCode    int                 `json:"status_code"`
+	Status        string              `json:"status"`
+	Headers       map[string][]string `json:"headers"`
+	ContentLength int64               `json:"content_length"` // -1 for unknown/chunked
 }
 
 // RegisterData contains information sent when a tunnel is registered

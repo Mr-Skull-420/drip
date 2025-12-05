@@ -66,6 +66,13 @@ bash <(curl -sL https://raw.githubusercontent.com/Gouryella/drip/main/scripts/in
 
 ## 使用
 
+### 首次配置
+
+```bash
+# 配置服务器地址和 token（只需一次）
+drip config init
+```
+
 ### 基础隧道
 
 ```bash
@@ -76,7 +83,7 @@ drip http 3000
 drip https 443
 
 # 选择你的子域名
-drip http 3000 --subdomain myapp
+drip http 3000 -n myapp
 # → https://myapp.your-domain.com
 
 # 暴露 TCP 服务（数据库、SSH 等）
@@ -89,28 +96,33 @@ drip tcp 5432
 
 ```bash
 # 转发到局域网其他机器
-drip http 8080 --address 192.168.1.100
+drip http 8080 -a 192.168.1.100
 
 # 转发到 Docker 容器
-drip http 3000 --address 172.17.0.2
+drip http 3000 -a 172.17.0.2
 
 # 转发到特定网卡
-drip http 3000 --address 10.0.0.5
+drip http 3000 -a 10.0.0.5
 ```
 
-### 守护模式
+### 后台模式
 
-让隧道在后台运行：
+使用 `-d` 让隧道在后台运行：
 
 ```bash
-# 以守护进程启动隧道
-drip daemon start http 3000
-drip daemon start https 8443 --subdomain api
+# 后台启动隧道
+drip http 3000 -d
+drip https 8443 -n api -d
 
-# 管理守护进程
-drip daemon list
-drip daemon stop http-3000
-drip daemon logs http-3000
+# 列出运行中的隧道
+drip list
+
+# 查看隧道日志
+drip attach http 3000
+
+# 停止隧道
+drip stop http 3000
+drip stop all
 ```
 
 ## 服务端部署
@@ -214,25 +226,25 @@ sudo journalctl -u drip-server -f
 drip http 3000
 
 # 测试第三方 webhook（如 Stripe）
-drip http 8000 --subdomain webhooks
+drip http 8000 -n webhooks
 ```
 
 **家庭服务器访问**
 ```bash
 # 远程访问家里的 NAS
-drip http 5000 --address 192.168.1.50
+drip http 5000 -a 192.168.1.50
 
-# 远程进入家庭网络
+# 通过 SSH 远程进入家庭网络
 drip tcp 22
 ```
 
 **Docker 与容器**
 ```bash
 # 暴露容器化应用
-drip http 8080 --address 172.17.0.3
+drip http 8080 -a 172.17.0.3
 
 # 数据库调试
-drip tcp 5432 --address db-container
+drip tcp 5432 -a db-container
 ```
 
 ## 命令参考
@@ -240,26 +252,29 @@ drip tcp 5432 --address db-container
 ```bash
 # HTTP 隧道
 drip http <端口> [参数]
-  --subdomain, -n    自定义子域名
-  --address, -a      目标地址（默认：127.0.0.1）
-  --server           服务器地址
-  --token            认证 token
+  -n, --subdomain    自定义子域名
+  -a, --address      目标地址（默认：127.0.0.1）
+  -d, --daemon       后台运行
+  -s, --server       服务器地址
+  -t, --token        认证 token
 
-# HTTPS 隧道
+# HTTPS 隧道（参数同 http）
 drip https <端口> [参数]
 
-# TCP 隧道
+# TCP 隧道（参数同 http）
 drip tcp <端口> [参数]
 
-# 守护进程命令
-drip daemon start <类型> <端口> [参数]
-drip daemon list
-drip daemon stop <名称>
-drip daemon logs <名称>
+# 后台隧道管理
+drip list              列出运行中的隧道
+drip list -i           交互模式
+drip attach [类型] [端口]   查看日志
+drip stop <类型> <端口>     停止隧道
+drip stop all               停止所有隧道
 
 # 配置
-drip config init
-drip config show
+drip config init       设置服务器和 token
+drip config show       显示当前配置
+drip config set <键> <值>
 ```
 
 ## 协议

@@ -221,13 +221,6 @@ func runConfigValidate(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
-func enabledDisabled(value bool) string {
-	if value {
-		return "enabled"
-	}
-	return "disabled"
-}
-
 func validateServerAddress(addr string) (bool, string) {
 	addr = strings.TrimSpace(addr)
 	if addr == "" {

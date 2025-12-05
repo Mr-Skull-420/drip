@@ -52,3 +52,4 @@ temp/
 certs/
 .drip-server.env
 benchmark-results/
+drip

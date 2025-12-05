@@ -7,9 +7,8 @@ import (
 	"drip/internal/shared/pool"
 )
 
-// EncodeDataPayload encodes a data header and payload into a frame payload.
-// Deprecated: Use EncodeDataPayloadPooled for better performance.
-func EncodeDataPayload(header DataHeader, data []byte) ([]byte, error) {
+// encodeDataPayload encodes a data header and payload into a frame payload.
+func encodeDataPayload(header DataHeader, data []byte) ([]byte, error) {
 	streamIDLen := len(header.StreamID)
 	requestIDLen := len(header.RequestID)
 
@@ -37,11 +36,6 @@ func EncodeDataPayload(header DataHeader, data []byte) ([]byte, error) {
 
 // EncodeDataPayloadPooled encodes with adaptive allocation based on load.
 // Returns payload slice and pool buffer pointer (may be nil).
-//
-// Adaptive strategy:
-// - Mid-load (<150 conn):   256KB threshold, pool disabled → max QPS
-// - High-load (≥300 conn):  32KB threshold, pool enabled → stable latency
-// - Transition (150-300):   Hysteresis to prevent flapping
 func EncodeDataPayloadPooled(header DataHeader, data []byte) (payload []byte, poolBuffer *[]byte, err error) {
 	streamIDLen := len(header.StreamID)
 	requestIDLen := len(header.RequestID)
@@ -50,12 +44,12 @@ func EncodeDataPayloadPooled(header DataHeader, data []byte) (payload []byte, po
 	dynamicThreshold := GetAdaptiveThreshold()
 
 	if totalLen < dynamicThreshold {
-		regularPayload, err := EncodeDataPayload(header, data)
+		regularPayload, err := encodeDataPayload(header, data)
 		return regularPayload, nil, err
 	}
 
 	if totalLen > pool.SizeLarge {
-		regularPayload, err := EncodeDataPayload(header, data)
+		regularPayload, err := encodeDataPayload(header, data)
 		return regularPayload, nil, err
 	}
 
@@ -99,8 +93,4 @@ func DecodeDataPayload(payload []byte) (DataHeader, []byte, error) {
 
 	data := payload[headerSize:]
 	return header, data, nil
-}
-
-func GetPayloadHeaderSize(header DataHeader) int {
-	return header.Size()
 }

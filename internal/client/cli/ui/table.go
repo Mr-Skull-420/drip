@@ -68,7 +68,7 @@ func (t *Table) Render() string {
 	// Header
 	headerParts := make([]string, len(t.headers))
 	for i, header := range t.headers {
-		style := tableHeaderStyle.Copy().Width(colWidths[i])
+		style := tableHeaderStyle.Width(colWidths[i])
 		headerParts[i] = style.Render(header)
 	}
 	output.WriteString(strings.Join(headerParts, "  "))
@@ -87,7 +87,7 @@ func (t *Table) Render() string {
 		rowParts := make([]string, len(t.headers))
 		for i, cell := range row {
 			if i < len(colWidths) {
-				style := tableCellStyle.Copy().Width(colWidths[i])
+				style := tableCellStyle.Width(colWidths[i])
 				rowParts[i] = style.Render(cell)
 			}
 		}

@@ -172,8 +172,27 @@ func (w *FrameWriter) Close() error {
 
 func (w *FrameWriter) Flush() {
 	w.mu.Lock()
-	defer w.mu.Unlock()
+	if w.closed {
+		w.mu.Unlock()
+		return
+	}
+
+	// First, drain the queue into batch
+	for {
+		select {
+		case frame, ok := <-w.queue:
+			if !ok {
+				break
+			}
+			w.batch = append(w.batch, frame)
+		default:
+			goto done
+		}
+	}
+done:
+	// Then flush the batch
 	w.flushBatchLocked()
+	w.mu.Unlock()
 }
 
 func (w *FrameWriter) EnableHeartbeat(interval time.Duration, callback func() *Frame) {

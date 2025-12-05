@@ -153,12 +153,7 @@ func StartDaemon(tunnelType string, port int, args []string) error {
 
 	// Build command arguments (remove -D/--daemon flag to prevent recursion)
 	var cleanArgs []string
-	skipNext := false
-	for i, arg := range args {
-		if skipNext {
-			skipNext = false
-			continue
-		}
+	for _, arg := range args {
 		// Skip -D or --daemon flags (but NOT --daemon-child)
 		if arg == "-D" || arg == "--daemon" {
 			continue
@@ -167,8 +162,6 @@ func StartDaemon(tunnelType string, port int, args []string) error {
 		if arg == "-d" {
 			continue
 		}
-		// Skip if next arg would be a value for a removed flag (not applicable for boolean)
-		_ = i
 		cleanArgs = append(cleanArgs, arg)
 	}
 

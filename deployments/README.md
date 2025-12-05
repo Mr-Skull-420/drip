@@ -1,6 +1,35 @@
 # Docker Deployment
 
-## Quick Start
+## Quick Start (Recommended)
+
+Deploy drip-server using pre-built images from GitHub Container Registry:
+
+```bash
+# Pull the latest image
+docker pull ghcr.io/gouryella/drip:latest
+
+# Or use docker compose
+curl -fsSL https://raw.githubusercontent.com/Gouryella/drip/main/docker-compose.release.yml -o docker-compose.yml
+
+# Create .env file
+cat > .env << EOF
+DOMAIN=tunnel.example.com
+AUTH_TOKEN=your-secret-token
+VERSION=latest
+EOF
+
+# Place your TLS certificates
+mkdir -p certs
+cp /path/to/fullchain.pem certs/
+cp /path/to/privkey.pem certs/
+
+# Start server
+docker compose up -d
+```
+
+## Build from Source
+
+If you prefer to build locally:
 
 ### Server (Production)
 

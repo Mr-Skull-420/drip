@@ -30,17 +30,6 @@ type ServerConfig struct {
 	Debug bool
 }
 
-// LegacyClientConfig holds the legacy client configuration
-// Deprecated: Use config.ClientConfig from client_config.go instead
-type LegacyClientConfig struct {
-	ServerURL   string
-	LocalTarget string
-	AuthToken   string
-	Subdomain   string
-	Verbose     bool
-	Insecure    bool // Skip TLS verification (for testing only)
-}
-
 // LoadTLSConfig loads TLS configuration
 func (c *ServerConfig) LoadTLSConfig() (*tls.Config, error) {
 	if !c.TLSEnabled {

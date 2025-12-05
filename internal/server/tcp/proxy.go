@@ -21,10 +21,17 @@ type TunnelProxy struct {
 	stopCh      chan struct{}
 	wg          sync.WaitGroup
 	clientAddr  string
-	streams     map[string]net.Conn // streamID -> external connection
+	streams     map[string]*proxyStream // streamID -> stream info
 	streamMu    sync.RWMutex
 	frameWriter *protocol.FrameWriter
 	bufferPool  *pool.BufferPool
+}
+
+// proxyStream holds connection info with close state
+type proxyStream struct {
+	conn   net.Conn
+	closed bool
+	mu     sync.Mutex
 }
 
 // NewTunnelProxy creates a new TCP tunnel proxy
@@ -36,7 +43,7 @@ func NewTunnelProxy(port int, subdomain string, tcpConn net.Conn, logger *zap.Lo
 		logger:      logger,
 		stopCh:      make(chan struct{}),
 		clientAddr:  tcpConn.RemoteAddr().String(),
-		streams:     make(map[string]net.Conn),
+		streams:     make(map[string]*proxyStream),
 		bufferPool:  pool.NewBufferPool(),
 		frameWriter: protocol.NewFrameWriter(tcpConn),
 	}
@@ -101,8 +108,13 @@ func (p *TunnelProxy) handleConnection(conn net.Conn) {
 
 	streamID := fmt.Sprintf("%d-%d", time.Now().UnixNano(), p.port)
 
+	stream := &proxyStream{
+		conn:   conn,
+		closed: false,
+	}
+
 	p.streamMu.Lock()
-	p.streams[streamID] = conn
+	p.streams[streamID] = stream
 	p.streamMu.Unlock()
 
 	defer func() {
@@ -117,6 +129,14 @@ func (p *TunnelProxy) handleConnection(conn net.Conn) {
 	buffer := (*bufPtr)[:pool.SizeMedium]
 
 	for {
+		// Check if stream is closed
+		stream.mu.Lock()
+		closed := stream.closed
+		stream.mu.Unlock()
+		if closed {
+			break
+		}
+
 		n, err := conn.Read(buffer)
 		if err != nil {
 			break
@@ -124,7 +144,7 @@ func (p *TunnelProxy) handleConnection(conn net.Conn) {
 
 		if n > 0 {
 			if err := p.sendDataToTunnel(streamID, buffer[:n]); err != nil {
-				p.logger.Error("Send to tunnel failed", zap.Error(err))
+				p.logger.Debug("Send to tunnel failed", zap.Error(err))
 				break
 			}
 		}
@@ -185,15 +205,24 @@ func (p *TunnelProxy) sendCloseToTunnel(streamID string) {
 
 func (p *TunnelProxy) HandleResponse(streamID string, data []byte) error {
 	p.streamMu.RLock()
-	conn, ok := p.streams[streamID]
+	stream, ok := p.streams[streamID]
 	p.streamMu.RUnlock()
 
 	if !ok {
-		return fmt.Errorf("stream not found: %s", streamID)
+		// Stream may have been closed by client, this is normal
+		return nil
 	}
 
-	if _, err := conn.Write(data); err != nil {
-		p.logger.Error("Write to client failed", zap.Error(err))
+	// Check if stream is closed
+	stream.mu.Lock()
+	if stream.closed {
+		stream.mu.Unlock()
+		return nil
+	}
+	stream.mu.Unlock()
+
+	if _, err := stream.conn.Write(data); err != nil {
+		p.logger.Debug("Write to client failed", zap.Error(err))
 		return err
 	}
 
@@ -203,12 +232,24 @@ func (p *TunnelProxy) HandleResponse(streamID string, data []byte) error {
 // CloseStream closes a stream
 func (p *TunnelProxy) CloseStream(streamID string) {
 	p.streamMu.RLock()
-	conn, ok := p.streams[streamID]
+	stream, ok := p.streams[streamID]
 	p.streamMu.RUnlock()
 
-	if ok {
-		conn.Close()
+	if !ok {
+		return
 	}
+
+	// Mark as closed first
+	stream.mu.Lock()
+	if stream.closed {
+		stream.mu.Unlock()
+		return
+	}
+	stream.closed = true
+	stream.mu.Unlock()
+
+	// Now close the connection
+	stream.conn.Close()
 }
 
 func (p *TunnelProxy) Stop() {
@@ -224,10 +265,13 @@ func (p *TunnelProxy) Stop() {
 	}
 
 	p.streamMu.Lock()
-	for _, conn := range p.streams {
-		conn.Close()
+	for _, stream := range p.streams {
+		stream.mu.Lock()
+		stream.closed = true
+		stream.mu.Unlock()
+		stream.conn.Close()
 	}
-	p.streams = make(map[string]net.Conn)
+	p.streams = make(map[string]*proxyStream)
 	p.streamMu.Unlock()
 
 	p.wg.Wait()

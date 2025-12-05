@@ -66,6 +66,13 @@ bash <(curl -sL https://raw.githubusercontent.com/Gouryella/drip/main/scripts/in
 
 ## Usage
 
+### First Time Setup
+
+```bash
+# Configure server and token (only needed once)
+drip config init
+```
+
 ### Basic Tunnels
 
 ```bash
@@ -76,7 +83,7 @@ drip http 3000
 drip https 443
 
 # Pick your subdomain
-drip http 3000 --subdomain myapp
+drip http 3000 -n myapp
 # → https://myapp.your-domain.com
 
 # Expose TCP service (database, SSH, etc.)
@@ -89,28 +96,33 @@ Not just localhost - forward to any device on your network:
 
 ```bash
 # Forward to another machine on LAN
-drip http 8080 --address 192.168.1.100
+drip http 8080 -a 192.168.1.100
 
 # Forward to Docker container
-drip http 3000 --address 172.17.0.2
+drip http 3000 -a 172.17.0.2
 
 # Forward to specific interface
-drip http 3000 --address 10.0.0.5
+drip http 3000 -a 10.0.0.5
 ```
 
-### Daemon Mode
+### Background Mode
 
-Run tunnels in the background:
+Run tunnels in the background with `-d`:
 
 ```bash
-# Start tunnel as daemon
-drip daemon start http 3000
-drip daemon start https 8443 --subdomain api
+# Start tunnel in background
+drip http 3000 -d
+drip https 8443 -n api -d
 
-# Manage daemons
-drip daemon list
-drip daemon stop http-3000
-drip daemon logs http-3000
+# List running tunnels
+drip list
+
+# View tunnel logs
+drip attach http 3000
+
+# Stop tunnels
+drip stop http 3000
+drip stop all
 ```
 
 ## Server Deployment
@@ -214,25 +226,25 @@ sudo journalctl -u drip-server -f
 drip http 3000
 
 # Test webhooks from services like Stripe
-drip http 8000 --subdomain webhooks
+drip http 8000 -n webhooks
 ```
 
 **Home Server Access**
 ```bash
 # Access home NAS remotely
-drip http 5000 --address 192.168.1.50
+drip http 5000 -a 192.168.1.50
 
-# Remote into home network
+# Remote into home network via SSH
 drip tcp 22
 ```
 
 **Docker & Containers**
 ```bash
 # Expose containerized app
-drip http 8080 --address 172.17.0.3
+drip http 8080 -a 172.17.0.3
 
 # Database access for debugging
-drip tcp 5432 --address db-container
+drip tcp 5432 -a db-container
 ```
 
 ## Command Reference
@@ -240,26 +252,29 @@ drip tcp 5432 --address db-container
 ```bash
 # HTTP tunnel
 drip http <port> [flags]
-  --subdomain, -n    Custom subdomain
-  --address, -a      Target address (default: 127.0.0.1)
-  --server           Server address
-  --token            Auth token
+  -n, --subdomain    Custom subdomain
+  -a, --address      Target address (default: 127.0.0.1)
+  -d, --daemon       Run in background
+  -s, --server       Server address
+  -t, --token        Auth token
 
-# HTTPS tunnel
+# HTTPS tunnel (same flags as http)
 drip https <port> [flags]
 
-# TCP tunnel
+# TCP tunnel (same flags as http)
 drip tcp <port> [flags]
 
-# Daemon commands
-drip daemon start <type> <port> [flags]
-drip daemon list
-drip daemon stop <name>
-drip daemon logs <name>
+# Background tunnel management
+drip list              List running tunnels
+drip list -i           Interactive mode
+drip attach [type] [port]   View logs
+drip stop <type> <port>     Stop tunnel
+drip stop all               Stop all tunnels
 
 # Configuration
-drip config init
-drip config show
+drip config init       Set up server and token
+drip config show       Show current config
+drip config set <key> <value>
 ```
 
 ## License

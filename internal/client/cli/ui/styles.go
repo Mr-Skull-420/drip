@@ -6,19 +6,12 @@ import (
 
 var (
 	// Colors inspired by Vercel CLI
-	primaryColor   = lipgloss.Color("#0070F3")
 	successColor   = lipgloss.Color("#0070F3")
 	warningColor   = lipgloss.Color("#F5A623")
 	errorColor     = lipgloss.Color("#E00")
 	mutedColor     = lipgloss.Color("#888")
 	highlightColor = lipgloss.Color("#0070F3")
 	cyanColor      = lipgloss.Color("#50E3C2")
-	purpleColor    = lipgloss.Color("#7928CA")
-
-	// Base styles
-	baseStyle = lipgloss.NewStyle().
-			PaddingLeft(1).
-			PaddingRight(1)
 
 	// Box styles - Vercel-like clean box
 	boxStyle = lipgloss.NewStyle().
@@ -27,14 +20,11 @@ var (
 			MarginTop(1).
 			MarginBottom(1)
 
-	successBoxStyle = boxStyle.Copy().
-			BorderForeground(successColor)
+	successBoxStyle = boxStyle.BorderForeground(successColor)
 
-	warningBoxStyle = boxStyle.Copy().
-			BorderForeground(warningColor)
+	warningBoxStyle = boxStyle.BorderForeground(warningColor)
 
-	errorBoxStyle = boxStyle.Copy().
-			BorderForeground(errorColor)
+	errorBoxStyle = boxStyle.BorderForeground(errorColor)
 
 	// Text styles
 	titleStyle = lipgloss.NewStyle().
@@ -85,10 +75,6 @@ var (
 
 	tableCellStyle = lipgloss.NewStyle().
 			PaddingRight(2)
-
-	tableRowHighlight = lipgloss.NewStyle().
-				Foreground(highlightColor).
-				Bold(true)
 )
 
 // Success returns a styled success message
