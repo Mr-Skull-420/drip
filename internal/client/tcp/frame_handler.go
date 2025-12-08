@@ -89,19 +89,21 @@ func NewFrameHandler(conn net.Conn, frameWriter *protocol.FrameWriter, localHost
 		httpClient: &http.Client{
 			// No overall timeout - streaming responses can take arbitrary time
 			Transport: &http.Transport{
-				MaxIdleConns:          1000,
-				MaxIdleConnsPerHost:   500,
-				MaxConnsPerHost:       0,
-				IdleConnTimeout:       180 * time.Second,
-				DisableCompression:    true,
-				DisableKeepAlives:     false,
-				TLSHandshakeTimeout:   10 * time.Second,
+				MaxIdleConns:          2000,              // Increased from 1000 for better connection reuse
+				MaxIdleConnsPerHost:   1000,              // Increased from 500 for high concurrency
+				MaxConnsPerHost:       0,                 // Unlimited connections per host
+				IdleConnTimeout:       180 * time.Second, // Keep connections alive for reuse
+				DisableCompression:    true,              // Disable compression for better CPU efficiency
+				DisableKeepAlives:     false,             // Enable keep-alive for connection reuse
+				TLSHandshakeTimeout:   5 * time.Second,   // Reduced from 10s for faster failure detection
 				TLSClientConfig:       tlsConfig,
-				ResponseHeaderTimeout: 30 * time.Second,
-				ExpectContinueTimeout: 1 * time.Second,
+				ResponseHeaderTimeout: 15 * time.Second,  // Reduced from 30s for faster timeout
+				ExpectContinueTimeout: 500 * time.Millisecond, // Reduced from 1s for better responsiveness
+				WriteBufferSize:       32 * 1024,         // 32KB write buffer
+				ReadBufferSize:        32 * 1024,         // 32KB read buffer
 				DialContext: (&net.Dialer{
-					Timeout:   5 * time.Second,
-					KeepAlive: 30 * time.Second,
+					Timeout:   3 * time.Second,  // Reduced from 5s for faster connection attempts
+					KeepAlive: 30 * time.Second, // Keep TCP keepalive
 				}).DialContext,
 			},
 			CheckRedirect: func(req *http.Request, via []*http.Request) error {
@@ -516,7 +518,12 @@ func (h *FrameHandler) adaptiveHTTPResponse(streamID, requestID string, resp *ht
 			break
 		}
 		if readErr != nil {
-			if errors.Is(readErr, context.Canceled) || errors.Is(readErr, context.DeadlineExceeded) || errors.Is(readErr, http.ErrBodyReadAfterClose) || errors.Is(readErr, net.ErrClosed) {
+			// Check for expected errors that indicate connection/body closure
+			if errors.Is(readErr, context.Canceled) ||
+				errors.Is(readErr, context.DeadlineExceeded) ||
+				errors.Is(readErr, http.ErrBodyReadAfterClose) ||
+				errors.Is(readErr, net.ErrClosed) ||
+				strings.Contains(readErr.Error(), "read on closed response body") {
 				return nil
 			}
 			return fmt.Errorf("read response body: %w", readErr)
@@ -652,7 +659,12 @@ func (h *FrameHandler) streamHTTPResponse(streamID, requestID string, resp *http
 			break
 		}
 		if readErr != nil {
-			if errors.Is(readErr, context.Canceled) || errors.Is(readErr, context.DeadlineExceeded) || errors.Is(readErr, http.ErrBodyReadAfterClose) || errors.Is(readErr, net.ErrClosed) {
+			// Check for expected errors that indicate connection/body closure
+			if errors.Is(readErr, context.Canceled) ||
+				errors.Is(readErr, context.DeadlineExceeded) ||
+				errors.Is(readErr, http.ErrBodyReadAfterClose) ||
+				errors.Is(readErr, net.ErrClosed) ||
+				strings.Contains(readErr.Error(), "read on closed response body") {
 				return nil
 			}
 			return fmt.Errorf("read response body: %w", readErr)

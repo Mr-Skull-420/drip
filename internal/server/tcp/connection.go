@@ -211,12 +211,15 @@ func (c *Connection) Handle() error {
 		return fmt.Errorf("failed to send registration ack: %w", err)
 	}
 
-	// Create frame writer for async writes
 	c.frameWriter = protocol.NewFrameWriter(c.conn)
+
+	c.frameWriter.SetWriteErrorHandler(func(err error) {
+		c.logger.Error("Write error detected, closing connection", zap.Error(err))
+		c.Close()
+	})
 
 	c.conn.SetReadDeadline(time.Time{})
 
-	// Start TCP proxy only for TCP tunnels
 	if req.TunnelType == protocol.TunnelTypeTCP {
 		c.proxy = NewTunnelProxy(c.port, subdomain, c.conn, c.logger)
 		if err := c.proxy.Start(); err != nil {
@@ -226,13 +229,10 @@ func (c *Connection) Handle() error {
 
 	go c.heartbeatChecker()
 
-	// Handle frames (pass reader for consistent buffering)
 	return c.handleFrames(reader)
 }
 
-// handleHTTPRequest handles HTTP requests that arrive on the TCP port
 func (c *Connection) handleHTTPRequest(reader *bufio.Reader) error {
-	// If no HTTP handler is configured, return error
 	if c.httpHandler == nil {
 		c.logger.Warn("HTTP request received but no HTTP handler configured")
 		response := "HTTP/1.1 503 Service Unavailable\r\n" +
@@ -295,18 +295,19 @@ func (c *Connection) handleHTTPRequest(reader *bufio.Reader) error {
 			zap.String("host", req.Host),
 		)
 
-		// Create a response writer that writes directly to the connection
 		respWriter := &httpResponseWriter{
 			conn:   c.conn,
+			writer: bufio.NewWriterSize(c.conn, 4096),
 			header: make(http.Header),
 		}
 
-		// Handle the request - this blocks until response is complete
 		c.httpHandler.ServeHTTP(respWriter, req)
 
-		// Ensure response is flushed to client
+		if err := respWriter.writer.Flush(); err != nil {
+			c.logger.Debug("Failed to flush HTTP response", zap.Error(err))
+		}
+
 		if tcpConn, ok := c.conn.(*net.TCPConn); ok {
-			// Force flush TCP buffers
 			tcpConn.SetNoDelay(true)
 			tcpConn.SetNoDelay(false)
 		}
@@ -316,19 +317,15 @@ func (c *Connection) handleHTTPRequest(reader *bufio.Reader) error {
 			zap.String("url", req.URL.String()),
 		)
 
-		// Check if we should close the connection
-		// Close if: Connection: close header, or HTTP/1.0 without Connection: keep-alive
 		shouldClose := false
 		if req.Close {
 			shouldClose = true
 		} else if req.ProtoMajor == 1 && req.ProtoMinor == 0 {
-			// HTTP/1.0 defaults to close unless keep-alive is explicitly requested
 			if req.Header.Get("Connection") != "keep-alive" {
 				shouldClose = true
 			}
 		}
 
-		// Also check if response indicated connection should close
 		if respWriter.headerWritten && respWriter.header.Get("Connection") == "close" {
 			shouldClose = true
 		}
@@ -563,20 +560,13 @@ func (c *Connection) heartbeatChecker() {
 	}
 }
 
-// SendFrame sends a frame to the client
 func (c *Connection) SendFrame(frame *protocol.Frame) error {
 	if c.frameWriter == nil {
 		return protocol.WriteFrame(c.conn, frame)
 	}
-	if err := c.frameWriter.WriteFrame(frame); err != nil {
-		return err
-	}
-	// Flush immediately to ensure the frame is sent without batching delay
-	c.frameWriter.Flush()
-	return nil
+	return c.frameWriter.WriteFrame(frame)
 }
 
-// sendError sends an error frame to the client
 func (c *Connection) sendError(code, message string) {
 	errMsg := protocol.ErrorMessage{
 		Code:    code,
@@ -586,22 +576,20 @@ func (c *Connection) sendError(code, message string) {
 	errFrame := protocol.NewFrame(protocol.FrameTypeError, data)
 
 	if c.frameWriter == nil {
-		// Fallback if frameWriter not initialized (early errors)
 		protocol.WriteFrame(c.conn, errFrame)
 	} else {
 		c.frameWriter.WriteFrame(errFrame)
 	}
 }
 
-// Close closes the connection
 func (c *Connection) Close() {
 	c.once.Do(func() {
-		// Unregister connection from adaptive load tracking
 		protocol.UnregisterConnection()
 
 		close(c.stopCh)
 
 		if c.frameWriter != nil {
+			c.frameWriter.Flush()
 			c.frameWriter.Close()
 		}
 
@@ -633,6 +621,7 @@ func (c *Connection) GetSubdomain() string {
 // httpResponseWriter implements http.ResponseWriter for writing to a net.Conn
 type httpResponseWriter struct {
 	conn          net.Conn
+	writer        *bufio.Writer  // Buffered writer for efficient I/O
 	header        http.Header
 	statusCode    int
 	headerWritten bool
@@ -649,27 +638,32 @@ func (w *httpResponseWriter) WriteHeader(statusCode int) {
 	w.statusCode = statusCode
 	w.headerWritten = true
 
-	// Write status line
 	statusText := http.StatusText(statusCode)
 	if statusText == "" {
 		statusText = "Unknown"
 	}
-	fmt.Fprintf(w.conn, "HTTP/1.1 %d %s\r\n", statusCode, statusText)
 
-	// Write headers
+	w.writer.WriteString("HTTP/1.1 ")
+	w.writer.WriteString(fmt.Sprintf("%d", statusCode))
+	w.writer.WriteByte(' ')
+	w.writer.WriteString(statusText)
+	w.writer.WriteString("\r\n")
+
 	for key, values := range w.header {
 		for _, value := range values {
-			fmt.Fprintf(w.conn, "%s: %s\r\n", key, value)
+			w.writer.WriteString(key)
+			w.writer.WriteString(": ")
+			w.writer.WriteString(value)
+			w.writer.WriteString("\r\n")
 		}
 	}
 
-	// Write empty line to end headers
-	fmt.Fprintf(w.conn, "\r\n")
+	w.writer.WriteString("\r\n")
 }
 
 func (w *httpResponseWriter) Write(data []byte) (int, error) {
 	if !w.headerWritten {
 		w.WriteHeader(http.StatusOK)
 	}
-	return w.conn.Write(data)
+	return w.writer.Write(data)
 }

@@ -25,6 +25,7 @@ type Handler struct {
 	domain     string
 	authToken  string
 	headerPool *pool.HeaderPool
+	bufferPool *pool.AdaptiveBufferPool
 }
 
 func NewHandler(manager *tunnel.Manager, logger *zap.Logger, responses *ResponseHandler, domain string, authToken string) *Handler {
@@ -35,6 +36,7 @@ func NewHandler(manager *tunnel.Manager, logger *zap.Logger, responses *Response
 		domain:     domain,
 		authToken:  authToken,
 		headerPool: pool.NewHeaderPool(),
+		bufferPool: pool.NewAdaptiveBufferPool(),
 	}
 }
 
@@ -103,8 +105,16 @@ func (h *Handler) handleAdaptiveRequest(w http.ResponseWriter, r *http.Request, 
 		defer h.responses.CleanupCancelFunc(requestID)
 	}
 
-	buffer := make([]byte, 0, streamingThreshold)
-	tempBuf := make([]byte, 32*1024)
+	largeBufferPtr := h.bufferPool.GetLarge()
+	tempBufPtr := h.bufferPool.GetMedium()
+
+	defer func() {
+		h.bufferPool.PutLarge(largeBufferPtr)
+		h.bufferPool.PutMedium(tempBufPtr)
+	}()
+
+	buffer := (*largeBufferPtr)[:0]
+	tempBuf := (*tempBufPtr)[:pool.MediumBufferSize]
 
 	var totalRead int64
 	var hitThreshold bool
