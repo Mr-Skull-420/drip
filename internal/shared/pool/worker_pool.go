@@ -1,8 +1,14 @@
 package pool
 
 import (
+	"runtime"
 	"sync"
 )
+
+// NumCPU returns the number of logical CPUs available
+func NumCPU() int {
+	return runtime.NumCPU()
+}
 
 // WorkerPool is a fixed-size goroutine pool for handling tasks
 type WorkerPool struct {

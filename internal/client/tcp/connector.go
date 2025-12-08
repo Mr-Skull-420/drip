@@ -43,6 +43,10 @@ type Connector struct {
 	handlerWg   sync.WaitGroup // Tracks active data frame handlers
 	closed      bool
 	closedMu    sync.RWMutex
+
+	// Worker pool for handling data frames
+	dataFrameQueue chan *protocol.Frame
+	workerCount    int
 }
 
 // ConnectorConfig holds connector configuration
@@ -71,16 +75,21 @@ func NewConnector(cfg *ConnectorConfig, logger *zap.Logger) *Connector {
 		localHost = "127.0.0.1"
 	}
 
+	numCPU := pool.NumCPU()
+	workerCount := max(numCPU+numCPU/2, 4)
+
 	return &Connector{
-		serverAddr: cfg.ServerAddr,
-		tlsConfig:  tlsConfig,
-		token:      cfg.Token,
-		tunnelType: cfg.TunnelType,
-		localHost:  localHost,
-		localPort:  cfg.LocalPort,
-		subdomain:  cfg.Subdomain,
-		logger:     logger,
-		stopCh:     make(chan struct{}),
+		serverAddr:     cfg.ServerAddr,
+		tlsConfig:      tlsConfig,
+		token:          cfg.Token,
+		tunnelType:     cfg.TunnelType,
+		localHost:      localHost,
+		localPort:      cfg.LocalPort,
+		subdomain:      cfg.Subdomain,
+		logger:         logger,
+		stopCh:         make(chan struct{}),
+		dataFrameQueue: make(chan *protocol.Frame, workerCount*100),
+		workerCount:    workerCount,
 	}
 }
 
@@ -134,6 +143,11 @@ func (c *Connector) Connect() error {
 	)
 
 	c.frameWriter.EnableHeartbeat(constants.HeartbeatInterval, c.createHeartbeatFrame)
+
+	for i := 0; i < c.workerCount; i++ {
+		c.handlerWg.Add(1)
+		go c.dataFrameWorker(i)
+	}
 
 	go c.frameHandler.WarmupConnectionPool(3)
 	go c.handleFrames()
@@ -200,6 +214,29 @@ func (c *Connector) register() error {
 	return nil
 }
 
+func (c *Connector) dataFrameWorker(workerID int) {
+	defer c.handlerWg.Done()
+
+	for {
+		select {
+		case frame, ok := <-c.dataFrameQueue:
+			if !ok {
+				return
+			}
+
+			if err := c.frameHandler.HandleDataFrame(frame); err != nil {
+				c.logger.Error("Failed to handle data frame",
+					zap.Int("worker_id", workerID),
+					zap.Error(err))
+			}
+			frame.Release()
+
+		case <-c.stopCh:
+			return
+		}
+	}
+}
+
 // handleFrames handles incoming frames from server
 func (c *Connector) handleFrames() {
 	defer c.Close()
@@ -246,14 +283,15 @@ func (c *Connector) handleFrames() {
 			frame.Release()
 
 		case protocol.FrameTypeData:
-			c.handlerWg.Add(1)
-			go func(f *protocol.Frame) {
-				defer c.handlerWg.Done()
-				defer f.Release()
-				if err := c.frameHandler.HandleDataFrame(f); err != nil {
-					c.logger.Error("Failed to handle data frame", zap.Error(err))
-				}
-			}(frame)
+			select {
+			case c.dataFrameQueue <- frame:
+			case <-c.stopCh:
+				frame.Release()
+				return
+			default:
+				c.logger.Warn("Data frame queue full, dropping frame")
+				frame.Release()
+			}
 
 		case protocol.FrameTypeClose:
 			frame.Release()
@@ -280,7 +318,6 @@ func (c *Connector) handleFrames() {
 	}
 }
 
-// createHeartbeatFrame creates a heartbeat frame to be sent by the write loop.
 func (c *Connector) createHeartbeatFrame() *protocol.Frame {
 	c.closedMu.RLock()
 	if c.closed {
@@ -293,7 +330,6 @@ func (c *Connector) createHeartbeatFrame() *protocol.Frame {
 	c.heartbeatSentAt = time.Now()
 	c.heartbeatMu.Unlock()
 
-	c.logger.Debug("Heartbeat sent")
 	return protocol.NewFrame(protocol.FrameTypeHeartbeat, nil)
 }
 
@@ -306,7 +342,6 @@ func (c *Connector) SendFrame(frame *protocol.Frame) error {
 	return c.frameWriter.WriteFrame(frame)
 }
 
-// Close closes the connection
 func (c *Connector) Close() error {
 	c.once.Do(func() {
 		c.closedMu.Lock()
@@ -314,9 +349,8 @@ func (c *Connector) Close() error {
 		c.closedMu.Unlock()
 
 		close(c.stopCh)
+		close(c.dataFrameQueue)
 
-		// Wait for active handlers with timeout
-		c.logger.Debug("Waiting for active handlers to complete")
 		done := make(chan struct{})
 		go func() {
 			c.handlerWg.Wait()
@@ -325,7 +359,6 @@ func (c *Connector) Close() error {
 
 		select {
 		case <-done:
-			c.logger.Debug("All handlers completed")
 		case <-time.After(3 * time.Second):
 			c.logger.Warn("Force closing: some handlers are still active")
 		}

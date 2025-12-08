@@ -22,12 +22,21 @@ type FrameWriter struct {
 	heartbeatCallback func() *Frame
 	heartbeatEnabled  bool
 	heartbeatControl  chan struct{}
+
+	// Error handling
+	writeErr      error
+	errOnce       sync.Once
+	onWriteError  func(error) // Callback for write errors
+
+	// Adaptive flushing
+	adaptiveFlush       bool // Enable adaptive flush based on queue depth
+	lowConcurrencyThreshold int // Queue depth threshold for immediate flush
 }
 
 func NewFrameWriter(conn io.Writer) *FrameWriter {
-	// Larger queue size for better burst handling across all load scenarios
-	// With adaptive buffer pool, memory pressure is well controlled
-	return NewFrameWriterWithConfig(conn, 128, 2*time.Millisecond, 2048)
+	w := NewFrameWriterWithConfig(conn, 256, 2*time.Millisecond, 4096)
+	w.EnableAdaptiveFlush(16)
+	return w
 }
 
 func NewFrameWriterWithConfig(conn io.Writer, maxBatch int, maxBatchWait time.Duration, queueSize int) *FrameWriter {
@@ -77,7 +86,10 @@ func (w *FrameWriter) writeLoop() {
 			w.mu.Lock()
 			w.batch = append(w.batch, frame)
 
-			if len(w.batch) >= w.maxBatch {
+			shouldFlushNow := len(w.batch) >= w.maxBatch ||
+				(w.adaptiveFlush && len(w.queue) <= w.lowConcurrencyThreshold)
+
+			if shouldFlushNow {
 				w.flushBatchLocked()
 			}
 			w.mu.Unlock()
@@ -127,7 +139,15 @@ func (w *FrameWriter) flushBatchLocked() {
 	}
 
 	for _, frame := range w.batch {
-		_ = WriteFrame(w.conn, frame)
+		if err := WriteFrame(w.conn, frame); err != nil {
+			w.errOnce.Do(func() {
+				w.writeErr = err
+				if w.onWriteError != nil {
+					go w.onWriteError(err)
+				}
+				w.closed = true
+			})
+		}
 		frame.Release()
 	}
 
@@ -138,6 +158,9 @@ func (w *FrameWriter) WriteFrame(frame *Frame) error {
 	w.mu.Lock()
 	if w.closed {
 		w.mu.Unlock()
+		if w.writeErr != nil {
+			return w.writeErr
+		}
 		return errors.New("writer closed")
 	}
 	w.mu.Unlock()
@@ -146,6 +169,12 @@ func (w *FrameWriter) WriteFrame(frame *Frame) error {
 	case w.queue <- frame:
 		return nil
 	case <-w.done:
+		w.mu.Lock()
+		err := w.writeErr
+		w.mu.Unlock()
+		if err != nil {
+			return err
+		}
 		return errors.New("writer closed")
 	}
 }
@@ -177,7 +206,6 @@ func (w *FrameWriter) Flush() {
 		return
 	}
 
-	// First, drain the queue into batch
 	for {
 		select {
 		case frame, ok := <-w.queue:
@@ -190,7 +218,6 @@ func (w *FrameWriter) Flush() {
 		}
 	}
 done:
-	// Then flush the batch
 	w.flushBatchLocked()
 	w.mu.Unlock()
 }
@@ -217,4 +244,23 @@ func (w *FrameWriter) DisableHeartbeat() {
 	case w.heartbeatControl <- struct{}{}:
 	default:
 	}
+}
+
+func (w *FrameWriter) SetWriteErrorHandler(handler func(error)) {
+	w.mu.Lock()
+	w.onWriteError = handler
+	w.mu.Unlock()
+}
+
+func (w *FrameWriter) EnableAdaptiveFlush(lowConcurrencyThreshold int) {
+	w.mu.Lock()
+	w.adaptiveFlush = true
+	w.lowConcurrencyThreshold = lowConcurrencyThreshold
+	w.mu.Unlock()
+}
+
+func (w *FrameWriter) DisableAdaptiveFlush() {
+	w.mu.Lock()
+	w.adaptiveFlush = false
+	w.mu.Unlock()
 }

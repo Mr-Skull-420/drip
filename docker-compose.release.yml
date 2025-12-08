@@ -23,7 +23,7 @@ services:
 
     volumes:
       - ./certs:/app/data/certs:ro
-      - drip-data:/app/data
+      - ./data:/app/data
 
     environment:
       TZ: ${TZ:-UTC}
@@ -62,10 +62,6 @@ services:
       timeout: 3s
       retries: 3
       start_period: 10s
-
-volumes:
-  drip-data:
-    driver: local
 
 networks:
   drip-net:

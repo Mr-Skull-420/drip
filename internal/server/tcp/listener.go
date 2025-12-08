@@ -34,11 +34,17 @@ type Listener struct {
 	workerPool    *pool.WorkerPool // Worker pool for connection handling
 }
 
-// NewListener creates a new TCP listener
 func NewListener(address string, tlsConfig *tls.Config, authToken string, manager *tunnel.Manager, logger *zap.Logger, portAlloc *PortAllocator, domain string, publicPort int, httpHandler http.Handler, responseChans HTTPResponseHandler) *Listener {
-	// Create worker pool with 50 workers and queue size of 1000
-	// This reduces goroutine creation overhead for connection handling
-	workerPool := pool.NewWorkerPool(50, 1000)
+	numCPU := pool.NumCPU()
+	workers := numCPU * 5
+	queueSize := workers * 20
+	workerPool := pool.NewWorkerPool(workers, queueSize)
+
+	logger.Info("Worker pool configured",
+		zap.Int("cpu_cores", numCPU),
+		zap.Int("workers", workers),
+		zap.Int("queue_size", queueSize),
+	)
 
 	return &Listener{
 		address:       address,
@@ -107,14 +113,11 @@ func (l *Listener) acceptLoop() {
 			}
 		}
 
-		// Handle connection using worker pool instead of creating new goroutine
-		// This reduces goroutine creation overhead and improves performance
 		l.wg.Add(1)
 		submitted := l.workerPool.Submit(func() {
 			l.handleConnection(conn)
 		})
 
-		// If pool is full or closed, fall back to direct goroutine
 		if !submitted {
 			go l.handleConnection(conn)
 		}
@@ -132,14 +135,38 @@ func (l *Listener) handleConnection(netConn net.Conn) {
 		return
 	}
 
+	// Set read deadline before handshake to prevent slow handshake attacks
+	if err := tlsConn.SetReadDeadline(time.Now().Add(10 * time.Second)); err != nil {
+		l.logger.Warn("Failed to set read deadline",
+			zap.String("remote_addr", netConn.RemoteAddr().String()),
+			zap.Error(err),
+		)
+		return
+	}
+
 	if err := tlsConn.Handshake(); err != nil {
-		// TLS handshake failures are common (HTTP clients, scanners, etc.)
-		// Log as WARN instead of ERROR
 		l.logger.Warn("TLS handshake failed",
 			zap.String("remote_addr", netConn.RemoteAddr().String()),
 			zap.Error(err),
 		)
 		return
+	}
+
+	// Clear the read deadline after successful handshake
+	if err := tlsConn.SetReadDeadline(time.Time{}); err != nil {
+		l.logger.Warn("Failed to clear read deadline",
+			zap.String("remote_addr", netConn.RemoteAddr().String()),
+			zap.Error(err),
+		)
+		return
+	}
+
+	if tcpConn, ok := tlsConn.NetConn().(*net.TCPConn); ok {
+		tcpConn.SetNoDelay(true)
+		tcpConn.SetKeepAlive(true)
+		tcpConn.SetKeepAlivePeriod(30 * time.Second)
+		tcpConn.SetReadBuffer(256 * 1024)
+		tcpConn.SetWriteBuffer(256 * 1024)
 	}
 
 	state := tlsConn.ConnectionState()

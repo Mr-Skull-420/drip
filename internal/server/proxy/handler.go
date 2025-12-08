@@ -1,11 +1,13 @@
 package proxy
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	json "github.com/goccy/go-json"
@@ -25,6 +27,7 @@ type Handler struct {
 	domain     string
 	authToken  string
 	headerPool *pool.HeaderPool
+	bufferPool *pool.AdaptiveBufferPool
 }
 
 func NewHandler(manager *tunnel.Manager, logger *zap.Logger, responses *ResponseHandler, domain string, authToken string) *Handler {
@@ -35,10 +38,22 @@ func NewHandler(manager *tunnel.Manager, logger *zap.Logger, responses *Response
 		domain:     domain,
 		authToken:  authToken,
 		headerPool: pool.NewHeaderPool(),
+		bufferPool: pool.NewAdaptiveBufferPool(),
 	}
 }
 
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	// Always handle /health and /stats directly, regardless of subdomain
+	if r.URL.Path == "/health" {
+		h.serveHealth(w, r)
+		return
+	}
+
+	if r.URL.Path == "/stats" {
+		h.serveStats(w, r)
+		return
+	}
+
 	subdomain := h.extractSubdomain(r.Host)
 
 	if subdomain == "" {
@@ -77,8 +92,12 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) handleAdaptiveRequest(w http.ResponseWriter, r *http.Request, transport tunnel.Transport, requestID string, subdomain string) {
 	const streamingThreshold int64 = 1 * 1024 * 1024
 
+	ctx := r.Context()
+
+	var cancelTransport func()
 	if transport != nil {
-		h.responses.RegisterCancelFunc(requestID, func() {
+		cancelOnce := sync.Once{}
+		cancelFunc := func() {
 			header := protocol.DataHeader{
 				StreamID:  requestID,
 				RequestID: requestID,
@@ -98,13 +117,26 @@ func (h *Handler) handleAdaptiveRequest(w http.ResponseWriter, r *http.Request, 
 					zap.Error(err),
 				)
 			}
-		})
+		}
 
+		cancelTransport = func() {
+			cancelOnce.Do(cancelFunc)
+		}
+
+		h.responses.RegisterCancelFunc(requestID, cancelTransport)
 		defer h.responses.CleanupCancelFunc(requestID)
 	}
 
-	buffer := make([]byte, 0, streamingThreshold)
-	tempBuf := make([]byte, 32*1024)
+	largeBufferPtr := h.bufferPool.GetLarge()
+	tempBufPtr := h.bufferPool.GetMedium()
+
+	defer func() {
+		h.bufferPool.PutLarge(largeBufferPtr)
+		h.bufferPool.PutMedium(tempBufPtr)
+	}()
+
+	buffer := (*largeBufferPtr)[:0]
+	tempBuf := (*tempBufPtr)[:pool.MediumBufferSize]
 
 	var totalRead int64
 	var hitThreshold bool
@@ -117,7 +149,7 @@ func (h *Handler) handleAdaptiveRequest(w http.ResponseWriter, r *http.Request, 
 		}
 		if err == io.EOF {
 			r.Body.Close()
-			h.sendBufferedRequest(w, r, transport, requestID, subdomain, buffer)
+			h.sendBufferedRequest(ctx, w, r, transport, requestID, subdomain, cancelTransport, buffer)
 			return
 		}
 		if err != nil {
@@ -134,14 +166,14 @@ func (h *Handler) handleAdaptiveRequest(w http.ResponseWriter, r *http.Request, 
 
 	if !hitThreshold {
 		r.Body.Close()
-		h.sendBufferedRequest(w, r, transport, requestID, subdomain, buffer)
+		h.sendBufferedRequest(ctx, w, r, transport, requestID, subdomain, cancelTransport, buffer)
 		return
 	}
 
-	h.streamLargeRequest(w, r, transport, requestID, subdomain, buffer)
+	h.streamLargeRequest(ctx, w, r, transport, requestID, subdomain, cancelTransport, buffer)
 }
 
-func (h *Handler) sendBufferedRequest(w http.ResponseWriter, r *http.Request, transport tunnel.Transport, requestID string, subdomain string, body []byte) {
+func (h *Handler) sendBufferedRequest(ctx context.Context, w http.ResponseWriter, r *http.Request, transport tunnel.Transport, requestID string, subdomain string, cancelTransport func(), body []byte) {
 	headers := h.headerPool.Get()
 	h.headerPool.CloneWithExtra(headers, r.Header, "Host", r.Host)
 
@@ -199,6 +231,15 @@ func (h *Handler) sendBufferedRequest(w http.ResponseWriter, r *http.Request, tr
 		h.writeHTTPResponse(w, respMsg, subdomain, r)
 	case <-streamingDone:
 		// Streaming response has been fully written by SendStreamingChunk
+	case <-ctx.Done():
+		if cancelTransport != nil {
+			cancelTransport()
+		}
+		h.logger.Debug("HTTP request context cancelled",
+			zap.String("request_id", requestID),
+			zap.String("subdomain", subdomain),
+		)
+		return
 	case <-time.After(5 * time.Minute):
 		h.logger.Error("Request timeout",
 			zap.String("request_id", requestID),
@@ -208,7 +249,7 @@ func (h *Handler) sendBufferedRequest(w http.ResponseWriter, r *http.Request, tr
 	}
 }
 
-func (h *Handler) streamLargeRequest(w http.ResponseWriter, r *http.Request, transport tunnel.Transport, requestID string, subdomain string, bufferedData []byte) {
+func (h *Handler) streamLargeRequest(ctx context.Context, w http.ResponseWriter, r *http.Request, transport tunnel.Transport, requestID string, subdomain string, cancelTransport func(), bufferedData []byte) {
 	headers := h.headerPool.Get()
 	h.headerPool.CloneWithExtra(headers, r.Header, "Host", r.Host)
 
@@ -302,8 +343,23 @@ func (h *Handler) streamLargeRequest(w http.ResponseWriter, r *http.Request, tra
 		}
 	}
 
-	buffer := make([]byte, 32*1024)
+	streamBufPtr := h.bufferPool.GetMedium()
+	defer h.bufferPool.PutMedium(streamBufPtr)
+	buffer := (*streamBufPtr)[:pool.MediumBufferSize]
 	for {
+		select {
+		case <-ctx.Done():
+			if cancelTransport != nil {
+				cancelTransport()
+			}
+			h.logger.Debug("Streaming request cancelled via context",
+				zap.String("request_id", requestID),
+				zap.String("subdomain", subdomain),
+			)
+			return
+		default:
+		}
+
 		n, readErr := r.Body.Read(buffer)
 		if n > 0 {
 			isLast := readErr == io.EOF
@@ -399,6 +455,15 @@ func (h *Handler) streamLargeRequest(w http.ResponseWriter, r *http.Request, tra
 		h.writeHTTPResponse(w, respMsg, subdomain, r)
 	case <-streamingDone:
 		// Streaming response has been fully written by SendStreamingChunk
+	case <-ctx.Done():
+		if cancelTransport != nil {
+			cancelTransport()
+		}
+		h.logger.Debug("Streaming HTTP request context cancelled",
+			zap.String("request_id", requestID),
+			zap.String("subdomain", subdomain),
+		)
+		return
 	case <-time.After(5 * time.Minute):
 		h.logger.Error("Streaming request timeout",
 			zap.String("request_id", requestID),
@@ -421,12 +486,12 @@ func (h *Handler) writeHTTPResponse(w http.ResponseWriter, resp *protocol.HTTPRe
 
 		// Skip hop-by-hop headers completely using canonical key comparison
 		if canonicalKey == "Connection" ||
-		   canonicalKey == "Keep-Alive" ||
-		   canonicalKey == "Transfer-Encoding" ||
-		   canonicalKey == "Upgrade" ||
-		   canonicalKey == "Proxy-Connection" ||
-		   canonicalKey == "Te" ||
-		   canonicalKey == "Trailer" {
+			canonicalKey == "Keep-Alive" ||
+			canonicalKey == "Transfer-Encoding" ||
+			canonicalKey == "Upgrade" ||
+			canonicalKey == "Proxy-Connection" ||
+			canonicalKey == "Te" ||
+			canonicalKey == "Trailer" {
 			continue
 		}
 
@@ -511,16 +576,6 @@ func (h *Handler) extractSubdomain(host string) string {
 }
 
 func (h *Handler) serveHomePage(w http.ResponseWriter, r *http.Request) {
-	if r.URL.Path == "/health" {
-		h.serveHealth(w, r)
-		return
-	}
-
-	if r.URL.Path == "/stats" {
-		h.serveStats(w, r)
-		return
-	}
-
 	html := `<!DOCTYPE html>
 <html>
 <head>
@@ -560,8 +615,15 @@ func (h *Handler) serveHealth(w http.ResponseWriter, r *http.Request) {
 		"timestamp":      time.Now().Unix(),
 	}
 
+	data, err := json.Marshal(health)
+	if err != nil {
+		http.Error(w, "Failed to encode response", http.StatusInternalServerError)
+		return
+	}
+
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(health)
+	w.Header().Set("Content-Length", fmt.Sprintf("%d", len(data)))
+	w.Write(data)
 }
 
 func (h *Handler) serveStats(w http.ResponseWriter, r *http.Request) {
@@ -594,6 +656,13 @@ func (h *Handler) serveStats(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 
+	data, err := json.Marshal(stats)
+	if err != nil {
+		http.Error(w, "Failed to encode response", http.StatusInternalServerError)
+		return
+	}
+
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(stats)
+	w.Header().Set("Content-Length", fmt.Sprintf("%d", len(data)))
+	w.Write(data)
 }
