@@ -64,8 +64,7 @@ type HTTPResponseHandler interface {
 // NewConnection creates a new connection handler
 func NewConnection(conn net.Conn, authToken string, manager *tunnel.Manager, logger *zap.Logger, portAlloc *PortAllocator, domain string, publicPort int, httpHandler http.Handler, responseChans HTTPResponseHandler) *Connection {
 	ctx, cancel := context.WithCancel(context.Background())
-	var mu sync.RWMutex
-	return &Connection{
+	c := &Connection{
 		conn:          conn,
 		authToken:     authToken,
 		manager:       manager,
@@ -79,8 +78,9 @@ func NewConnection(conn net.Conn, authToken string, manager *tunnel.Manager, log
 		lastHeartbeat: time.Now(),
 		ctx:           ctx,
 		cancel:        cancel,
-		pauseCond:     sync.NewCond(&mu),
 	}
+	c.pauseCond = sync.NewCond(&c.mu)
+	return c
 }
 
 // Handle handles the connection lifecycle
