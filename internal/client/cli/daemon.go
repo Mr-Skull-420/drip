@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"drip/internal/shared/ui"
+	"drip/pkg/config"
 	json "github.com/goccy/go-json"
 )
 
@@ -196,9 +197,62 @@ func StartDaemon(tunnelType string, port int, args []string) error {
 	_ = logFile.Close()
 	_ = devNull.Close()
 
-	fmt.Println(ui.RenderDaemonStarted(tunnelType, port, cmd.Process.Pid, logPath))
+	localHost := parseFlagValue(cleanArgs, "--address", "-a", "127.0.0.1")
+	displayHost := localHost
+	if displayHost == "127.0.0.1" {
+		displayHost = "localhost"
+	}
+	forwardAddr := fmt.Sprintf("%s:%d", displayHost, port)
+
+	serverAddr := parseFlagValue(cleanArgs, "--server", "-s", "")
+	if serverAddr == "" {
+		if cfg, err := config.LoadClientConfig(""); err == nil {
+			serverAddr = cfg.Server
+		}
+	}
+
+	var url string
+
+	info, err := waitForDaemonInfo(tunnelType, port, cmd.Process.Pid, 30*time.Second)
+	if err == nil && info != nil && info.PID == cmd.Process.Pid && info.URL != "" {
+		url = info.URL
+		if info.Server != "" {
+			serverAddr = info.Server
+		}
+	}
+
+	fmt.Println(ui.RenderDaemonStarted(tunnelType, port, cmd.Process.Pid, logPath, url, forwardAddr, serverAddr))
 
 	return nil
+}
+
+func parseFlagValue(args []string, longName string, shortName string, defaultValue string) string {
+	for i := 0; i < len(args); i++ {
+		if args[i] == longName || args[i] == shortName {
+			if i+1 < len(args) && args[i+1] != "" {
+				return args[i+1]
+			}
+		}
+	}
+	return defaultValue
+}
+
+func waitForDaemonInfo(tunnelType string, port int, pid int, timeout time.Duration) (*DaemonInfo, error) {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if !IsProcessRunning(pid) {
+			return nil, nil
+		}
+
+		info, err := LoadDaemonInfo(tunnelType, port)
+		if err == nil && info != nil && info.PID == pid {
+			if info.URL != "" {
+				return info, nil
+			}
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	return nil, nil
 }
 
 // CleanupStaleDaemons removes daemon info for processes that are no longer running
