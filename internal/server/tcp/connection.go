@@ -634,66 +634,7 @@ func (c *Connection) handleDataConnect(frame *protocol.Frame, reader *bufio.Read
 	// Store tunnelID for cleanup
 	c.tunnelID = req.TunnelID
 
-	// For TCP tunnels, the data connection is upgraded to a yamux session and used for
-	// stream forwarding, not framed request/response routing.
-	if group.TunnelType == protocol.TunnelTypeTCP {
-		resp := protocol.DataConnectResponse{
-			Accepted:     true,
-			ConnectionID: req.ConnectionID,
-			Message:      "Data connection accepted",
-		}
-
-		respData, _ := json.Marshal(resp)
-		ackFrame := protocol.NewFrame(protocol.FrameTypeDataConnectAck, respData)
-
-		if err := protocol.WriteFrame(c.conn, ackFrame); err != nil {
-			return fmt.Errorf("failed to send data connect ack: %w", err)
-		}
-
-		c.logger.Info("TCP data connection established",
-			zap.String("tunnel_id", req.TunnelID),
-			zap.String("connection_id", req.ConnectionID),
-		)
-
-		// Clear deadline for yamux data-plane.
-		_ = c.conn.SetReadDeadline(time.Time{})
-
-		// Public server acts as yamux Client, client connector acts as yamux Server.
-		bc := &bufferedConn{
-			Conn:   c.conn,
-			reader: reader,
-		}
-
-		cfg := yamux.DefaultConfig()
-		cfg.EnableKeepAlive = false
-		cfg.LogOutput = io.Discard
-		cfg.AcceptBacklog = constants.YamuxAcceptBacklog
-
-		session, err := yamux.Client(bc, cfg)
-		if err != nil {
-			return fmt.Errorf("failed to init yamux session: %w", err)
-		}
-		c.session = session
-
-		group.AddSession(req.ConnectionID, session)
-		defer group.RemoveSession(req.ConnectionID)
-
-		select {
-		case <-c.stopCh:
-			return nil
-		case <-session.CloseChan():
-			return nil
-		}
-	}
-
-	// Add data connection to group
-	dataConn, err := c.groupManager.AddDataConnection(&req, c.conn)
-	if err != nil {
-		c.sendDataConnectError("join_failed", err.Error())
-		return fmt.Errorf("failed to join connection group: %w", err)
-	}
-
-	// Send success response
+	// Send success response before upgrading the connection to yamux.
 	resp := protocol.DataConnectResponse{
 		Accepted:     true,
 		ConnectionID: req.ConnectionID,
@@ -712,56 +653,34 @@ func (c *Connection) handleDataConnect(frame *protocol.Frame, reader *bufio.Read
 		zap.String("connection_id", req.ConnectionID),
 	)
 
-	// Handle data frames on this connection
-	return c.handleDataConnectionFrames(dataConn, reader)
-}
+	// Clear deadline for yamux data-plane.
+	_ = c.conn.SetReadDeadline(time.Time{})
 
-// handleDataConnectionFrames handles frames on a data connection
-func (c *Connection) handleDataConnectionFrames(dataConn *DataConnection, reader *bufio.Reader) error {
-	defer func() {
-		// Get the group and remove this data connection
-		if group, ok := c.groupManager.GetGroup(c.tunnelID); ok {
-			group.RemoveDataConnection(dataConn.ID)
-		}
-	}()
+	// Public server acts as yamux Client, client connector acts as yamux Server.
+	bc := &bufferedConn{
+		Conn:   c.conn,
+		reader: reader,
+	}
 
-	for {
-		select {
-		case <-dataConn.stopCh:
-			return nil
-		default:
-		}
+	cfg := yamux.DefaultConfig()
+	cfg.EnableKeepAlive = false
+	cfg.LogOutput = io.Discard
+	cfg.AcceptBacklog = constants.YamuxAcceptBacklog
 
-		c.conn.SetReadDeadline(time.Now().Add(constants.RequestTimeout))
-		frame, err := protocol.ReadFrame(reader)
-		if err != nil {
-			// Timeout is OK, continue
-			if isTimeoutError(err) {
-				continue
-			}
-			return err
-		}
+	session, err := yamux.Client(bc, cfg)
+	if err != nil {
+		return fmt.Errorf("failed to init yamux session: %w", err)
+	}
+	c.session = session
 
-		dataConn.mu.Lock()
-		dataConn.LastActive = time.Now()
-		dataConn.mu.Unlock()
+	group.AddSession(req.ConnectionID, session)
+	defer group.RemoveSession(req.ConnectionID)
 
-		sf := protocol.WithFrame(frame)
-
-		switch sf.Frame.Type {
-		case protocol.FrameTypeClose:
-			sf.Close()
-			c.logger.Info("Data connection closed by client",
-				zap.String("connection_id", dataConn.ID))
-			return nil
-
-		default:
-			sf.Close()
-			c.logger.Warn("Unexpected frame type on data connection",
-				zap.String("type", sf.Frame.Type.String()),
-				zap.String("connection_id", dataConn.ID),
-			)
-		}
+	select {
+	case <-c.stopCh:
+		return nil
+	case <-session.CloseChan():
+		return nil
 	}
 }
 
