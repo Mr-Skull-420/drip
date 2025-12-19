@@ -39,11 +39,6 @@ func NewHandler(manager *tunnel.Manager, logger *zap.Logger, domain string, auth
 }
 
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	if r.Method == http.MethodConnect {
-		h.handleConnect(w, r)
-		return
-	}
-
 	if r.URL.Path == "/health" {
 		h.serveHealth(w, r)
 		return
@@ -72,6 +67,11 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	tType := tconn.GetTunnelType()
 	if tType != "" && tType != protocol.TunnelTypeHTTP && tType != protocol.TunnelTypeHTTPS {
 		http.Error(w, "Tunnel does not accept HTTP traffic", http.StatusBadGateway)
+		return
+	}
+
+	if r.Method == http.MethodConnect {
+		http.Error(w, "CONNECT not supported for HTTP tunnels", http.StatusMethodNotAllowed)
 		return
 	}
 
@@ -385,67 +385,4 @@ func (h *Handler) serveStats(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Content-Length", fmt.Sprintf("%d", len(data)))
 	w.Write(data)
-}
-
-func (h *Handler) handleConnect(w http.ResponseWriter, r *http.Request) {
-	targetAddr := r.Host
-	if targetAddr == "" {
-		targetAddr = r.URL.Host
-	}
-	if targetAddr == "" {
-		http.Error(w, "Bad Request: missing target host", http.StatusBadRequest)
-		return
-	}
-
-	if !strings.Contains(targetAddr, ":") {
-		targetAddr = targetAddr + ":443"
-	}
-
-	h.logger.Info("CONNECT proxy request",
-		zap.String("target", targetAddr),
-		zap.String("remote", r.RemoteAddr),
-	)
-
-	targetConn, err := net.DialTimeout("tcp", targetAddr, 10*time.Second)
-	if err != nil {
-		h.logger.Warn("Failed to connect to target",
-			zap.String("target", targetAddr),
-			zap.Error(err),
-		)
-		http.Error(w, "Bad Gateway: failed to connect to target", http.StatusBadGateway)
-		return
-	}
-
-	hj, ok := w.(http.Hijacker)
-	if !ok {
-		targetConn.Close()
-		http.Error(w, "Hijacking not supported", http.StatusInternalServerError)
-		return
-	}
-
-	clientConn, _, err := hj.Hijack()
-	if err != nil {
-		targetConn.Close()
-		http.Error(w, "Failed to hijack connection", http.StatusInternalServerError)
-		return
-	}
-
-	_, err = clientConn.Write([]byte("HTTP/1.1 200 Connection Established\r\n\r\n"))
-	if err != nil {
-		clientConn.Close()
-		targetConn.Close()
-		return
-	}
-
-	go func() {
-		defer targetConn.Close()
-		defer clientConn.Close()
-		_, _ = io.Copy(targetConn, clientConn)
-	}()
-
-	go func() {
-		defer targetConn.Close()
-		defer clientConn.Close()
-		_, _ = io.Copy(clientConn, targetConn)
-	}()
 }
